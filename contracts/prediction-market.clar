@@ -10,6 +10,13 @@
 (define-constant err-unauthorized (err u105))
 (define-constant err-already-resolved (err u106))
 (define-constant err-invalid-amount (err u107))
+(define-constant err-zero-amount (err u108))
+(define-constant err-already-claimed (err u109))
+
+;; 1 STX per share
+(define-constant stx-per-share u1000000)
+;; maximum resolution time (2 years from now)
+(define-constant max-resolution-time u105120)
 
 ;; data vars
 (define-data-var fee-percentage uint u1)
@@ -33,7 +40,7 @@
 
 (define-map user-positions
     { market-id: uint, user: principal }
-    { yes-shares: uint, no-shares: uint, stx-locked: uint }
+    { yes-shares: uint, no-shares: uint, stx-locked: uint, claimed: bool }
 )
 
 ;; public functions
@@ -44,6 +51,7 @@
         )
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (asserts! (> resolution-time block-height) err-invalid-market)
+        (asserts! (<= (- resolution-time block-height) max-resolution-time) err-invalid-market)
         
         (map-set markets market-id {
             question: question,
@@ -64,28 +72,23 @@
     (let
         (
             (market (unwrap! (map-get? markets market-id) err-invalid-market))
-            (user-position (default-to { yes-shares: u0, no-shares: u0, stx-locked: u0 }
+            (user-position (default-to { yes-shares: u0, no-shares: u0, stx-locked: u0, claimed: false }
                 (map-get? user-positions { market-id: market-id, user: tx-sender })))
         )
         (asserts! (not (get resolved market)) err-market-closed)
-        (asserts! (>= stx-amount (* amount u1000000)) err-insufficient-balance)
+        (asserts! (> amount u0) err-zero-amount)
+        (asserts! (is-eq stx-amount (* amount stx-per-share)) err-insufficient-balance)
         
         ;; Transfer STX to contract
         (try! (stx-transfer? stx-amount tx-sender (as-contract tx-sender)))
         
         ;; Update positions
-        (if yes
-            (map-set user-positions
-                { market-id: market-id, user: tx-sender }
-                { yes-shares: (+ (get yes-shares user-position) amount),
-                  no-shares: (get no-shares user-position),
-                  stx-locked: (+ (get stx-locked user-position) stx-amount) })
-            (map-set user-positions
-                { market-id: market-id, user: tx-sender }
-                { yes-shares: (get yes-shares user-position),
-                  no-shares: (+ (get no-shares user-position) amount),
-                  stx-locked: (+ (get stx-locked user-position) stx-amount) })
-        )
+        (map-set user-positions
+            { market-id: market-id, user: tx-sender }
+            { yes-shares: (+ (get yes-shares user-position) (if yes amount u0)),
+              no-shares: (+ (get no-shares user-position) (if yes u0 amount)),
+              stx-locked: (+ (get stx-locked user-position) stx-amount),
+              claimed: false })
         
         ;; Update market state
         (map-set markets market-id
@@ -128,6 +131,7 @@
             (outcome (unwrap! (get outcome market) err-invalid-outcome))
         )
         (asserts! (get resolved market) err-market-closed)
+        (asserts! (not (get claimed user-position)) err-already-claimed)
         
         (let
             (
@@ -140,8 +144,10 @@
             ;; Transfer winnings
             (try! (as-contract (stx-transfer? winnings tx-sender tx-sender)))
             
-            ;; Clear position
-            (map-delete user-positions { market-id: market-id, user: tx-sender })
+            ;; Mark position as claimed
+            (map-set user-positions 
+                { market-id: market-id, user: tx-sender }
+                (merge user-position { claimed: true }))
             (ok winnings)
         )
     )
